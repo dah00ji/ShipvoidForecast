@@ -1,0 +1,667 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Shipvoid Forecast Dashboard</title>
+    <script src="https://unpkg.com/htmx.org@1.9.10"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        walmart: {
+                            blue: '#0053e2',
+                            spark: '#ffc220',
+                            'blue-dark': '#004c91',
+                            'blue-light': '#1a75ff'
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        .htmx-request .refresh-text { display: none; }
+        .htmx-request .loading-spinner { display: inline-block; }
+        .loading-spinner { display: none; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .animate-spin { animation: spin 1s linear infinite; }
+        .toast { transform: translateX(100%); transition: transform 0.3s ease; }
+        .toast.show { transform: translateX(0); }
+    </style>
+</head>
+<body class="bg-gray-100 min-h-screen">
+    <!-- Header -->
+    <header class="bg-gradient-to-r from-walmart-blue to-walmart-blue-dark text-white shadow-lg">
+        <div class="max-w-7xl mx-auto px-4 py-5">
+            <div class="flex items-center justify-between">
+                <div class="flex items-center gap-4">
+                    <img src="/static/team-logo.png" alt="Team Logo" class="h-16 w-auto" onerror="this.style.display='none'">
+                    <div>
+                        <h1 class="text-2xl font-bold">Shipvoid Forecast Dashboard</h1>
+                        <p class="text-blue-200 text-sm">Cross-Reference Report</p>
+                    </div>
+                </div>
+                <div class="text-right text-sm">
+                    <p class="text-blue-200">Last Refresh: <span id="load-time">{{ load_time[:19] if load_time else 'N/A' }}</span></p>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <main class="max-w-7xl mx-auto px-4 py-6">
+        <!-- Source Path & Refresh Controls -->
+        <div class="bg-white rounded-xl shadow-md p-4 mb-6">
+            <div class="flex flex-col gap-4">
+                <div class="flex flex-col md:flex-row gap-4 items-end">
+                    <!-- Shipvoid Source Path -->
+                    <div class="flex-1">
+                        <label class="block text-sm font-medium text-gray-700 mb-1">📁 Shipvoid Forecast Path</label>
+                        <input type="text" id="sourcePath" name="source_path" value="{{ source_path }}" 
+                               class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-walmart-blue focus:border-transparent"
+                               placeholder="\\\\server\\share\\Ship_Void_Forecast">
+                    </div>
+                    
+                    <!-- Legacy Unbilled Path -->
+                    <div class="flex-1">
+                        <label class="block text-sm font-medium text-gray-700 mb-1">📁 Legacy Unbilled Cartons Path</label>
+                        <input type="text" id="legacyPath" name="legacy_path" value="{{ config.legacy_source_path }}" 
+                               class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-walmart-blue focus:border-transparent"
+                               placeholder="\\\\server\\share\\Legacy or local folder">
+                    </div>
+                    
+                    <!-- Refresh Button -->
+                    <button type="button" id="refresh-btn" onclick="refreshData()"
+                            class="bg-walmart-blue hover:bg-walmart-blue-dark text-white font-semibold px-6 py-2 rounded-lg transition-colors flex items-center gap-2 whitespace-nowrap">
+                        <span class="loading-spinner animate-spin">⟳</span>
+                        <span class="refresh-text">🔄 Refresh Data</span>
+                    </button>
+                </div>
+                <p class="text-xs text-gray-500">💡 Tip: Leave Legacy path empty to use local repo. Shipvoid looks for <code>Shipvoid*.xlsm</code>, Legacy looks for <code>Legacy*.csv</code></p>
+            </div>
+        </div>
+
+        {% if error %}
+        <div class="bg-red-100 border-l-4 border-red-500 text-red-700 p-4 mb-6 rounded-r-lg">
+            <p class="font-bold">Error Loading Data</p>
+            <p>{{ error }}</p>
+        </div>
+        {% endif %}
+
+        <!-- Stats Cards -->
+        <div id="stats-container">
+            {% include 'partials/stats.html' %}
+        </div>
+
+        <!-- Chart -->
+        <div class="bg-white rounded-xl shadow-md p-6 mb-6">
+            <h2 class="text-xl font-semibold text-walmart-blue mb-4 text-center">Picks by Label Date</h2>
+            <div style="height: 300px;">
+                <canvas id="dateChart"></canvas>
+            </div>
+        </div>
+
+        <!-- Filters -->
+        <div class="bg-white rounded-xl shadow-md p-4 mb-6">
+            <div class="flex flex-wrap gap-3 items-center">
+                <input type="text" id="searchInput" placeholder="🔍 Search all fields..." 
+                       class="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-walmart-blue w-64">
+                
+                <select id="sourceFilter" class="px-3 py-2 border border-gray-300 rounded-lg">
+                    <option value="">All Sources</option>
+                    <option value="In House">In House</option>
+                    <option value="CrossDock">CrossDock</option>
+                </select>
+                
+                <!-- Multi-select for Shipvoid Status (renamed Legacy Status) -->
+                <div class="relative" id="shipvoidStatusDropdown">
+                    <button type="button" onclick="toggleMultiSelect('shipvoidStatus')" 
+                            class="px-3 py-2 border border-gray-300 rounded-lg bg-white flex items-center gap-2 min-w-[160px]">
+                        <span id="shipvoidStatusLabel">Legacy Status</span>
+                        <svg class="w-4 h-4 ml-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+                    </button>
+                    <div id="shipvoidStatusOptions" class="hidden absolute z-50 mt-1 w-56 bg-white border border-gray-300 rounded-lg shadow-lg max-h-60 overflow-y-auto">
+                        <div id="shipvoidStatusCheckboxes"></div>
+                    </div>
+                </div>
+                
+                <select id="whseDeptFilter" class="px-3 py-2 border border-gray-300 rounded-lg">
+                    <option value="">All Whse Depts</option>
+                </select>
+                
+                <select id="areaFilter" class="px-3 py-2 border border-gray-300 rounded-lg">
+                    <option value="">All Areas</option>
+                </select>
+
+                <!-- Multi-select for Legacy Status -->
+                <div class="relative" id="legacyStatusDropdown">
+                    <button type="button" onclick="toggleMultiSelect('legacyStatus')" 
+                            class="px-3 py-2 border border-gray-300 rounded-lg bg-white flex items-center gap-2 min-w-[160px]">
+                        <span id="legacyStatusLabel">All Atlas Status</span>
+                        <svg class="w-4 h-4 ml-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+                    </button>
+                    <div id="legacyStatusOptions" class="hidden absolute z-50 mt-1 w-56 bg-white border border-gray-300 rounded-lg shadow-lg max-h-60 overflow-y-auto">
+                        <label class="flex items-center px-3 py-2 hover:bg-gray-100 cursor-pointer border-b border-gray-200">
+                            <input type="checkbox" value="__BLANK__" class="legacy-status-checkbox mr-2"> ⚠️ Not in Legacy
+                        </label>
+                        <div id="legacyStatusCheckboxes"></div>
+                    </div>
+                </div>
+                
+                <!-- Multi-select for Dates -->
+                <div class="relative" id="dateDropdown">
+                    <button type="button" onclick="toggleMultiSelect('date')" 
+                            class="px-3 py-2 border border-gray-300 rounded-lg bg-white flex items-center gap-2 min-w-[140px]">
+                        <span id="dateLabel">All Dates</span>
+                        <svg class="w-4 h-4 ml-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+                    </button>
+                    <div id="dateOptions" class="hidden absolute z-50 mt-1 w-48 bg-white border border-gray-300 rounded-lg shadow-lg max-h-60 overflow-y-auto">
+                        <div id="dateCheckboxes"></div>
+                    </div>
+                </div>
+                
+                <button onclick="resetFilters()" class="px-4 py-2 bg-gray-200 hover:bg-gray-300 rounded-lg text-gray-700 transition-colors">
+                    Reset Filters
+                </button>
+            </div>
+        </div>
+
+        <!-- Action Buttons -->
+        <div class="flex gap-3 mb-4">
+            <button onclick="exportToCSV()" class="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg font-medium transition-colors">
+                📥 Export CSV
+            </button>
+            <button onclick="copyContainerIds()" class="bg-walmart-spark hover:bg-yellow-500 text-gray-800 px-4 py-2 rounded-lg font-medium transition-colors">
+                📋 Copy Page IDs
+            </button>
+            <div class="flex-1"></div>
+            <select id="pageSize" onchange="changePageSize()" class="px-3 py-2 border border-gray-300 rounded-lg">
+                <option value="25">25 per page</option>
+                <option value="50" selected>50 per page</option>
+                <option value="100">100 per page</option>
+                <option value="250">250 per page</option>
+            </select>
+        </div>
+
+        <!-- Data Table -->
+        <div class="bg-white rounded-xl shadow-md overflow-hidden mb-6">
+            <div class="overflow-x-auto">
+                <table class="w-full text-sm">
+                    <thead class="bg-walmart-blue text-white">
+                        <tr>
+                            <th class="px-3 py-3 text-left cursor-pointer hover:bg-walmart-blue-dark" onclick="sortTable('container_id')">Container ID</th>
+                            <th class="px-3 py-3 text-left cursor-pointer hover:bg-walmart-blue-dark" onclick="sortTable('source_type')">Source</th>
+                            <th class="px-3 py-3 text-left cursor-pointer hover:bg-walmart-blue-dark" onclick="sortTable('item')">Item</th>
+                            <th class="px-3 py-3 text-left cursor-pointer hover:bg-walmart-blue-dark" onclick="sortTable('item_description')">Description</th>
+                            <th class="px-3 py-3 text-left cursor-pointer hover:bg-walmart-blue-dark" onclick="sortTable('po')">PO</th>
+                            <th class="px-3 py-3 text-left cursor-pointer hover:bg-walmart-blue-dark" onclick="sortTable('whse_dept')">Whse Dept</th>
+                            <th class="px-3 py-3 text-left cursor-pointer hover:bg-walmart-blue-dark" onclick="sortTable('area')">Area</th>
+                            <th class="px-3 py-3 text-left cursor-pointer hover:bg-walmart-blue-dark" onclick="sortTable('slot')">Slot</th>
+                            <th class="px-3 py-3 text-left cursor-pointer hover:bg-walmart-blue-dark" onclick="sortTable('shipvoid_status')">Status</th>
+                            <th class="px-3 py-3 text-left cursor-pointer hover:bg-walmart-blue-dark" onclick="sortTable('latest_event_ts')">Event Time</th>
+                            <th class="px-3 py-3 text-left cursor-pointer hover:bg-walmart-blue-dark" onclick="sortTable('latest_event_name')">Event</th>
+                            <th class="px-3 py-3 text-left cursor-pointer hover:bg-walmart-blue-dark" onclick="sortTable('latest_event_status')">Atlas Status</th>
+                            <th class="px-3 py-3 text-left cursor-pointer hover:bg-walmart-blue-dark" onclick="sortTable('atlas_location')">Location</th>
+                            <th class="px-3 py-3 text-left cursor-pointer hover:bg-walmart-blue-dark" onclick="sortTable('label_date')">Label Date</th>
+                        </tr>
+                    </thead>
+                    <tbody id="tableBody" class="divide-y divide-gray-200"></tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Pagination -->
+        <div class="flex items-center justify-between bg-white rounded-xl shadow-md p-4">
+            <p class="text-gray-600 text-sm">
+                Showing <span id="showingStart">0</span> - <span id="showingEnd">0</span> 
+                of <span id="totalRecords">0</span> records
+            </p>
+            <div id="pageButtons" class="flex gap-1"></div>
+        </div>
+    </main>
+
+    <!-- Toast Notification -->
+    <div id="toast" class="toast fixed bottom-4 right-4 bg-green-600 text-white px-6 py-3 rounded-lg shadow-lg"></div>
+
+    <script>
+        // Initialize data from server
+        let allData = {{ data | safe }};
+        let filteredData = [...allData];
+        let currentPage = 1;
+        let pageSize = 50;
+        let sortColumn = null;
+        let sortDirection = 'asc';
+        let dateChart = null;
+
+        // Initialize on page load
+        document.addEventListener('DOMContentLoaded', function() {
+            initChart();
+            initFilters();
+            renderTable();
+        });
+
+        // Listen for HTMX refresh completion
+        document.body.addEventListener('htmx:afterRequest', function(evt) {
+            if (evt.detail.pathInfo.requestPath === '/api/refresh') {
+                // Reload the page to get fresh data
+                location.reload();
+            }
+        });
+
+        function initChart() {
+            const ctx = document.getElementById('dateChart').getContext('2d');
+            const dateCounts = {};
+            allData.forEach(row => {
+                const date = row.label_date;
+                dateCounts[date] = (dateCounts[date] || 0) + 1;
+            });
+            const sortedDates = Object.keys(dateCounts).sort();
+            const counts = sortedDates.map(d => dateCounts[d]);
+
+            dateChart = new Chart(ctx, {
+                type: 'bar',
+                plugins: [ChartDataLabels],
+                data: {
+                    labels: sortedDates,
+                    datasets: [{
+                        label: 'Picks',
+                        data: counts,
+                        backgroundColor: '#0053e2',
+                        borderRadius: 4
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    layout: {
+                        padding: { top: 25 }
+                    },
+                    plugins: {
+                        legend: { display: false },
+                        datalabels: {
+                            anchor: 'end',
+                            align: 'top',
+                            color: '#374151',
+                            font: { weight: 'bold', size: 11 },
+                            formatter: (value) => value.toLocaleString()
+                        }
+                    },
+                    scales: {
+                        y: {
+                            beginAtZero: true,
+                            ticks: { callback: v => v.toLocaleString() }
+                        }
+                    }
+                }
+            });
+        }
+
+        function updateChart(data) {
+            const dateCounts = {};
+            data.forEach(row => {
+                dateCounts[row.label_date] = (dateCounts[row.label_date] || 0) + 1;
+            });
+            const sortedDates = Object.keys(dateCounts).sort();
+            dateChart.data.labels = sortedDates;
+            dateChart.data.datasets[0].data = sortedDates.map(d => dateCounts[d]);
+            dateChart.update();
+        }
+
+        function initFilters() {
+            // Populate single-select dropdowns
+            function populateFilter(id, key) {
+                const filter = document.getElementById(id);
+                const values = [...new Set(allData.map(d => d[key]).filter(s => s && s !== ''))].sort();
+                values.forEach(val => {
+                    const opt = document.createElement('option');
+                    opt.value = val;
+                    opt.textContent = val;
+                    filter.appendChild(opt);
+                });
+            }
+            populateFilter('whseDeptFilter', 'whse_dept');
+            populateFilter('areaFilter', 'area');
+
+            // Populate multi-select for Shipvoid Status (Legacy Status)
+            const shipvoidStatusValues = [...new Set(allData.map(d => d.shipvoid_status).filter(s => s && s !== ''))].sort();
+            const shipvoidStatusContainer = document.getElementById('shipvoidStatusCheckboxes');
+            shipvoidStatusValues.forEach(val => {
+                const label = document.createElement('label');
+                label.className = 'flex items-center px-3 py-2 hover:bg-gray-100 cursor-pointer';
+                // Default: check all EXCEPT "BILLED OR INACTIVE"
+                const isChecked = val.toUpperCase() !== 'BILLED OR INACTIVE' ? 'checked' : '';
+                label.innerHTML = `<input type="checkbox" value="${val}" class="shipvoid-status-checkbox mr-2" ${isChecked}> ${val}`;
+                shipvoidStatusContainer.appendChild(label);
+            });
+
+            // Populate multi-select for Legacy Status (Atlas Status)
+            const legacyStatusValues = [...new Set(allData.map(d => d.latest_event_status).filter(s => s && s !== ''))].sort();
+            const legacyContainer = document.getElementById('legacyStatusCheckboxes');
+            legacyStatusValues.forEach(val => {
+                const label = document.createElement('label');
+                label.className = 'flex items-center px-3 py-2 hover:bg-gray-100 cursor-pointer';
+                label.innerHTML = `<input type="checkbox" value="${val}" class="legacy-status-checkbox mr-2"> ${val}`;
+                legacyContainer.appendChild(label);
+            });
+
+            // Populate multi-select for Dates
+            const dateValues = [...new Set(allData.map(d => d.label_date).filter(s => s && s !== '' && s !== 'NaT'))].sort();
+            const dateContainer = document.getElementById('dateCheckboxes');
+            dateValues.forEach(val => {
+                const label = document.createElement('label');
+                label.className = 'flex items-center px-3 py-2 hover:bg-gray-100 cursor-pointer';
+                label.innerHTML = `<input type="checkbox" value="${val}" class="date-checkbox mr-2"> ${val}`;
+                dateContainer.appendChild(label);
+            });
+
+            // Event listeners for single-select filters
+            ['searchInput', 'sourceFilter', 'whseDeptFilter', 'areaFilter']
+                .forEach(id => document.getElementById(id).addEventListener(id === 'searchInput' ? 'input' : 'change', applyFilters));
+
+            // Event listeners for multi-select checkboxes
+            document.querySelectorAll('.shipvoid-status-checkbox').forEach(cb => cb.addEventListener('change', applyFilters));
+            document.querySelectorAll('.legacy-status-checkbox').forEach(cb => cb.addEventListener('change', applyFilters));
+            document.querySelectorAll('.date-checkbox').forEach(cb => cb.addEventListener('change', applyFilters));
+            
+            // Update label to show default selection
+            updateMultiSelectLabel('shipvoidStatus');
+
+            // Close dropdowns when clicking outside
+            document.addEventListener('click', function(e) {
+                if (!e.target.closest('#shipvoidStatusDropdown')) {
+                    document.getElementById('shipvoidStatusOptions').classList.add('hidden');
+                }
+                if (!e.target.closest('#legacyStatusDropdown')) {
+                    document.getElementById('legacyStatusOptions').classList.add('hidden');
+                }
+                if (!e.target.closest('#dateDropdown')) {
+                    document.getElementById('dateOptions').classList.add('hidden');
+                }
+            });
+            
+            // Apply initial filter with defaults
+            applyFilters();
+        }
+
+        function toggleMultiSelect(type) {
+            const optionsMap = {
+                'shipvoidStatus': 'shipvoidStatusOptions',
+                'legacyStatus': 'legacyStatusOptions',
+                'date': 'dateOptions'
+            };
+            const optionsEl = document.getElementById(optionsMap[type]);
+            optionsEl.classList.toggle('hidden');
+        }
+
+        function getSelectedValues(checkboxClass) {
+            return [...document.querySelectorAll('.' + checkboxClass + ':checked')].map(cb => cb.value);
+        }
+
+        function updateMultiSelectLabel(type) {
+            const configMap = {
+                'shipvoidStatus': { checkboxClass: 'shipvoid-status-checkbox', labelId: 'shipvoidStatusLabel', defaultText: 'Legacy Status' },
+                'legacyStatus': { checkboxClass: 'legacy-status-checkbox', labelId: 'legacyStatusLabel', defaultText: 'All Atlas Status' },
+                'date': { checkboxClass: 'date-checkbox', labelId: 'dateLabel', defaultText: 'All Dates' }
+            };
+            const config = configMap[type];
+            const selected = getSelectedValues(config.checkboxClass);
+            const labelEl = document.getElementById(config.labelId);
+            const totalCheckboxes = document.querySelectorAll('.' + config.checkboxClass).length;
+            
+            if (selected.length === 0) {
+                labelEl.textContent = config.defaultText;
+            } else if (selected.length === totalCheckboxes) {
+                labelEl.textContent = 'All ' + (type === 'shipvoidStatus' ? 'Statuses' : type === 'date' ? 'Dates' : 'Atlas');
+            } else if (selected.length === 1) {
+                labelEl.textContent = selected[0] === '__BLANK__' ? 'Not in Legacy' : selected[0];
+            } else {
+                labelEl.textContent = `${selected.length} selected`;
+            }
+        }
+
+        function applyFilters() {
+            const search = document.getElementById('searchInput').value.toLowerCase();
+            const source = document.getElementById('sourceFilter').value;
+            const whseDept = document.getElementById('whseDeptFilter').value;
+            const area = document.getElementById('areaFilter').value;
+            
+            // Multi-select values
+            const selectedShipvoidStatuses = getSelectedValues('shipvoid-status-checkbox');
+            const selectedLegacyStatuses = getSelectedValues('legacy-status-checkbox');
+            const selectedDates = getSelectedValues('date-checkbox');
+            
+            // Update labels
+            updateMultiSelectLabel('shipvoidStatus');
+            updateMultiSelectLabel('legacyStatus');
+            updateMultiSelectLabel('date');
+
+            filteredData = allData.filter(row => {
+                if (search && !Object.values(row).join(' ').toLowerCase().includes(search)) return false;
+                if (source && row.source_type !== source) return false;
+                if (whseDept && row.whse_dept !== whseDept) return false;
+                if (area && row.area !== area) return false;
+                
+                // Multi-select Shipvoid Status filter (Legacy Status)
+                if (selectedShipvoidStatuses.length > 0 && !selectedShipvoidStatuses.includes(row.shipvoid_status)) return false;
+                
+                // Multi-select Atlas Status filter
+                if (selectedLegacyStatuses.length > 0) {
+                    const hasBlank = selectedLegacyStatuses.includes('__BLANK__');
+                    const otherStatuses = selectedLegacyStatuses.filter(s => s !== '__BLANK__');
+                    const rowStatus = row.latest_event_status || '';
+                    
+                    // Match if: (blank selected AND row is blank) OR (row status is in selected statuses)
+                    const matchesBlank = hasBlank && !rowStatus;
+                    const matchesStatus = otherStatuses.includes(rowStatus);
+                    if (!matchesBlank && !matchesStatus) return false;
+                }
+                
+                // Multi-select Date filter
+                if (selectedDates.length > 0 && !selectedDates.includes(row.label_date)) return false;
+                
+                return true;
+            });
+
+            currentPage = 1;
+            updateStats();
+            updateChart(filteredData);
+            renderTable();
+        }
+
+        function updateStats() {
+            const total = filteredData.length;
+            const inhouse = filteredData.filter(d => d.source_type === 'In House').length;
+            const crossdock = filteredData.filter(d => d.source_type === 'CrossDock').length;
+            
+            // Calculate potential cost for at-risk containers (exclude VF and BILLED OR INACTIVE)
+            const billedStatuses = ['VF', 'BILLED OR INACTIVE'];
+            const atRiskData = filteredData.filter(d => !billedStatuses.includes((d.shipvoid_status || '').toUpperCase()));
+            const potentialCost = atRiskData.reduce((sum, d) => {
+                const cost = parseFloat(d.cost) || 0;
+                return sum + cost;
+            }, 0);
+            
+            document.getElementById('stat-total').textContent = total.toLocaleString();
+            document.getElementById('stat-inhouse').textContent = inhouse.toLocaleString();
+            document.getElementById('stat-crossdock').textContent = crossdock.toLocaleString();
+            
+            // Update cost card if it exists
+            const costEl = document.getElementById('stat-cost');
+            if (costEl) {
+                costEl.textContent = '$' + potentialCost.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+            }
+            const atRiskCountEl = costEl?.parentElement?.querySelector('.text-xs');
+            if (atRiskCountEl) {
+                atRiskCountEl.textContent = atRiskData.length.toLocaleString() + ' at-risk containers';
+            }
+        }
+
+        function sortTable(column) {
+            if (sortColumn === column) {
+                sortDirection = sortDirection === 'asc' ? 'desc' : 'asc';
+            } else {
+                sortColumn = column;
+                sortDirection = 'asc';
+            }
+            filteredData.sort((a, b) => {
+                let va = (a[column] || '').toString().toLowerCase();
+                let vb = (b[column] || '').toString().toLowerCase();
+                if (va < vb) return sortDirection === 'asc' ? -1 : 1;
+                if (va > vb) return sortDirection === 'asc' ? 1 : -1;
+                return 0;
+            });
+            renderTable();
+        }
+
+        function renderTable() {
+            const tbody = document.getElementById('tableBody');
+            const start = (currentPage - 1) * pageSize;
+            const end = Math.min(start + pageSize, filteredData.length);
+            const pageData = filteredData.slice(start, end);
+
+            tbody.innerHTML = pageData.map(row => `
+                <tr class="hover:bg-gray-50">
+                    <td class="px-3 py-2 font-mono text-xs">${row.container_id}</td>
+                    <td class="px-3 py-2"><span class="px-2 py-1 rounded text-xs font-medium ${row.source_type === 'In House' ? 'bg-blue-100 text-blue-800' : 'bg-purple-100 text-purple-800'}">${row.source_type || '-'}</span></td>
+                    <td class="px-3 py-2">${row.item || '-'}</td>
+                    <td class="px-3 py-2 max-w-xs truncate" title="${row.item_description || ''}">${row.item_description || '-'}</td>
+                    <td class="px-3 py-2">${row.po || '-'}</td>
+                    <td class="px-3 py-2">${row.whse_dept || '-'}</td>
+                    <td class="px-3 py-2">${row.area || '-'}</td>
+                    <td class="px-3 py-2">${row.slot || '-'}</td>
+                    <td class="px-3 py-2"><span class="px-2 py-1 rounded text-xs font-medium bg-gray-100">${row.shipvoid_status || '-'}</span></td>
+                    <td class="px-3 py-2 text-xs">${row.latest_event_ts || '-'}</td>
+                    <td class="px-3 py-2 text-xs">${row.latest_event_name || '-'}</td>
+                    <td class="px-3 py-2"><span class="px-2 py-1 rounded text-xs font-medium ${row.latest_event_status ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800'}">${row.latest_event_status || 'Not Found'}</span></td>
+                    <td class="px-3 py-2">${row.atlas_location || '-'}</td>
+                    <td class="px-3 py-2">${row.label_date}</td>
+                </tr>
+            `).join('');
+
+            document.getElementById('showingStart').textContent = filteredData.length > 0 ? start + 1 : 0;
+            document.getElementById('showingEnd').textContent = end;
+            document.getElementById('totalRecords').textContent = filteredData.length.toLocaleString();
+            renderPagination();
+        }
+
+        function renderPagination() {
+            const totalPages = Math.ceil(filteredData.length / pageSize);
+            const btns = document.getElementById('pageButtons');
+            let html = `<button class="px-3 py-1 rounded border ${currentPage === 1 ? 'bg-gray-100 text-gray-400' : 'hover:bg-gray-100'}" onclick="goToPage(1)" ${currentPage === 1 ? 'disabled' : ''}>&laquo;</button>`;
+            html += `<button class="px-3 py-1 rounded border ${currentPage === 1 ? 'bg-gray-100 text-gray-400' : 'hover:bg-gray-100'}" onclick="goToPage(${currentPage - 1})" ${currentPage === 1 ? 'disabled' : ''}>&lsaquo;</button>`;
+            
+            let startP = Math.max(1, currentPage - 2);
+            let endP = Math.min(totalPages, currentPage + 2);
+            for (let i = startP; i <= endP; i++) {
+                html += `<button class="px-3 py-1 rounded border ${i === currentPage ? 'bg-walmart-blue text-white' : 'hover:bg-gray-100'}" onclick="goToPage(${i})">${i}</button>`;
+            }
+            
+            html += `<button class="px-3 py-1 rounded border ${currentPage === totalPages ? 'bg-gray-100 text-gray-400' : 'hover:bg-gray-100'}" onclick="goToPage(${currentPage + 1})" ${currentPage === totalPages ? 'disabled' : ''}>&rsaquo;</button>`;
+            html += `<button class="px-3 py-1 rounded border ${currentPage === totalPages ? 'bg-gray-100 text-gray-400' : 'hover:bg-gray-100'}" onclick="goToPage(${totalPages})" ${currentPage === totalPages ? 'disabled' : ''}>&raquo;</button>`;
+            btns.innerHTML = html;
+        }
+
+        function goToPage(page) {
+            const totalPages = Math.ceil(filteredData.length / pageSize);
+            if (page >= 1 && page <= totalPages) {
+                currentPage = page;
+                renderTable();
+            }
+        }
+
+        function changePageSize() {
+            pageSize = parseInt(document.getElementById('pageSize').value);
+            currentPage = 1;
+            renderTable();
+        }
+
+        function resetFilters() {
+            document.getElementById('searchInput').value = '';
+            document.getElementById('sourceFilter').value = '';
+            document.getElementById('whseDeptFilter').value = '';
+            document.getElementById('areaFilter').value = '';
+            
+            // Reset shipvoid status to default (all checked except BILLED OR INACTIVE)
+            document.querySelectorAll('.shipvoid-status-checkbox').forEach(cb => {
+                cb.checked = cb.value.toUpperCase() !== 'BILLED OR INACTIVE';
+            });
+            
+            // Clear other multi-select checkboxes
+            document.querySelectorAll('.legacy-status-checkbox').forEach(cb => cb.checked = false);
+            document.querySelectorAll('.date-checkbox').forEach(cb => cb.checked = false);
+            
+            // Reset labels
+            updateMultiSelectLabel('shipvoidStatus');
+            document.getElementById('legacyStatusLabel').textContent = 'All Atlas Status';
+            document.getElementById('dateLabel').textContent = 'All Dates';
+            
+            // Apply filters with default shipvoid status selection
+            applyFilters();
+        }
+
+        function exportToCSV() {
+            const headers = ['Container ID','Source','Item','Description','PO','Whse Dept','Area','Slot','Status','Event Time','Event','Atlas Status','Location','Label Date'];
+            const rows = filteredData.map(r => [r.container_id,r.source_type,r.item,r.item_description,r.po,r.whse_dept,r.area,r.slot,r.shipvoid_status,r.latest_event_ts,r.latest_event_name,r.latest_event_status,r.atlas_location,r.label_date]);
+            let csv = headers.join(',') + '\n' + rows.map(r => r.map(c => `"${c || ''}"`).join(',')).join('\n');
+            const blob = new Blob([csv], {type: 'text/csv'});
+            const link = document.createElement('a');
+            link.href = URL.createObjectURL(blob);
+            link.download = `shipvoid_report_${new Date().toISOString().slice(0,10)}.csv`;
+            link.click();
+        }
+
+        function copyContainerIds() {
+            // Only copy container IDs from the current page view
+            const start = (currentPage - 1) * pageSize;
+            const end = Math.min(start + pageSize, filteredData.length);
+            const pageData = filteredData.slice(start, end);
+            
+            const ids = [...new Set(pageData.map(r => r.container_id))].filter(Boolean);
+            if (!ids.length) { showToast('No container IDs to copy!', 'warning'); return; }
+            navigator.clipboard.writeText(ids.join('\n')).then(() => showToast(`Copied ${ids.length.toLocaleString()} container IDs from this page!`));
+        }
+
+        async function refreshData() {
+            const btn = document.getElementById('refresh-btn');
+            btn.classList.add('htmx-request');
+            
+            try {
+                const sourcePath = document.getElementById('sourcePath').value;
+                const legacyPath = document.getElementById('legacyPath').value;
+                const formData = new FormData();
+                formData.append('source_path', sourcePath);
+                formData.append('legacy_path', legacyPath);
+                
+                const response = await fetch('/api/refresh', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                if (response.ok) {
+                    showToast('Data refreshed! Reloading...');
+                    setTimeout(() => location.reload(), 500);
+                } else {
+                    showToast('Failed to refresh data', 'warning');
+                }
+            } catch (error) {
+                showToast('Error refreshing: ' + error.message, 'warning');
+            } finally {
+                btn.classList.remove('htmx-request');
+            }
+        }
+
+        function showToast(msg, type = 'success') {
+            const toast = document.getElementById('toast');
+            toast.textContent = msg;
+            const bgColor = type === 'warning' ? 'bg-yellow-500 text-gray-800' : 
+                           type === 'info' ? 'bg-walmart-blue text-white' : 'bg-green-600 text-white';
+            toast.className = `toast fixed bottom-4 right-4 px-6 py-3 rounded-lg shadow-lg show ${bgColor}`;
+            setTimeout(() => toast.classList.remove('show'), 3000);
+        }
+    </script>
+</body>
+</html>

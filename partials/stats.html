@@ -1,0 +1,58 @@
+<!-- Stats Cards Partial - Updated via HTMX on refresh -->
+<div class="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-5 gap-4 mb-6">
+    <!-- Total Containers -->
+    <div class="bg-gradient-to-br from-walmart-blue to-walmart-blue-dark text-white rounded-xl p-5 shadow-md">
+        <p class="text-4xl font-bold" id="stat-total">{{ "{:,}".format(stats.total | default(0) | int) }}</p>
+        <p class="text-blue-200 text-sm mt-1">Total Containers</p>
+    </div>
+    
+    <!-- In House -->
+    <div class="bg-gradient-to-br from-walmart-blue to-walmart-blue-dark text-white rounded-xl p-5 shadow-md">
+        <p class="text-4xl font-bold" id="stat-inhouse">{{ "{:,}".format(stats.inhouse | default(0) | int) }}</p>
+        <p class="text-blue-200 text-sm mt-1">In House</p>
+    </div>
+    
+    <!-- CrossDock -->
+    <div class="bg-gradient-to-br from-walmart-blue to-walmart-blue-dark text-white rounded-xl p-5 shadow-md">
+        <p class="text-4xl font-bold" id="stat-crossdock">{{ "{:,}".format(stats.crossdock | default(0) | int) }}</p>
+        <p class="text-blue-200 text-sm mt-1">CrossDock</p>
+    </div>
+    
+    <!-- Potential Shipvoid Cost -->
+    <div class="bg-gradient-to-br from-red-500 to-red-700 text-white rounded-xl p-5 shadow-md">
+        <p class="text-3xl font-bold" id="stat-cost">${{ "{:,.2f}".format(stats.potential_cost | default(0) | float) }}</p>
+        <p class="text-red-200 text-sm mt-1">💰 Potential Shipvoid $</p>
+        <p class="text-red-300 text-xs">{{ "{:,}".format(stats.at_risk_count | default(0) | int) }} at-risk containers</p>
+    </div>
+    
+    <!-- Oldest Date -->
+    <div class="bg-gradient-to-br from-walmart-spark to-yellow-500 text-gray-800 rounded-xl p-5 shadow-md">
+        <p class="text-2xl font-bold">{{ stats.oldest_date | default('N/A') }}</p>
+        <p class="text-yellow-800 text-sm mt-1">Oldest Label Date</p>
+    </div>
+</div>
+
+<!-- File Info -->
+<div class="bg-white rounded-xl shadow-md p-4 mb-6">
+    <div class="flex flex-wrap gap-6 text-sm text-gray-600">
+        <div>
+            <span class="font-medium text-gray-800">📁 Shipvoid File:</span>
+            <span class="ml-2">{{ stats.shipvoid_file | default('Not loaded') }}</span>
+        </div>
+        <div>
+            <span class="font-medium text-gray-800">📁 Legacy File:</span>
+            <span class="ml-2">{{ stats.legacy_file | default('Not loaded') }}</span>
+        </div>
+        <div>
+            <span class="font-medium text-gray-800">📍 Source:</span>
+            <span class="ml-2 font-mono text-xs">{{ source_path }}</span>
+        </div>
+    </div>
+</div>
+
+{% if error %}
+<div class="bg-red-100 border-l-4 border-red-500 text-red-700 p-4 mb-6 rounded-r-lg">
+    <p class="font-bold">Error Loading Data</p>
+    <p>{{ error }}</p>
+</div>
+{% endif %}
