@@ -3,10 +3,15 @@
 Shipvoid Forecast & Legacy Unbilled Cartons Cross-Reference Report Generator
 
 This script merges data from:
-1. Shipvoid Forecast (Excel) - contains container status/location
+1. Shipvoid Forecast (Excel .xlsm) - contains container status/location with Inhouse and Crossdock sheets
 2. Legacy Unbilled Cartons (CSV) - contains event timestamps and statuses
 
+Both files can be downloaded automatically from SharePoint.
+
 Output: Interactive HTML report with pivot dashboard and filterable table
+
+Data Source: SharePoint folder at:
+https://teams.wal-mart.com/:f:/r/sites/AtlasAmbientRDCPlaybookPlanning/Shared%20Documents/Shipvoid%20Forecast/6031
 """
 
 import pandas as pd
@@ -14,24 +19,37 @@ import json
 from pathlib import Path
 from datetime import datetime
 
+# Import SharePoint downloader for pulling files from Teams
+try:
+    from sharepoint_downloader import download_shipvoid_files
+    SHAREPOINT_AVAILABLE = True
+except ImportError:
+    SHAREPOINT_AVAILABLE = False
+    print("Warning: SharePoint downloader not available. Using local files only.")
+
 
 def load_shipvoid_forecast(file_path: str) -> pd.DataFrame:
     """Load and clean the Shipvoid Forecast Excel file (both Inhouse and Crossdock sheets)."""
     print(f"Loading Shipvoid Forecast from: {file_path}")
     
-    # Select and rename relevant columns
+    # Column mapping from Excel to internal names
+    # Note: Container ID is now created by concatenating Store + Div + Carton Number
     columns_needed = {
-        'Container ID': 'container_id',
         'Item Number': 'item',
         'Item Description': 'item_description',
         'PO Number': 'po',
         'Status': 'shipvoid_status',
         'Label Date': 'label_date',
         'Store': 'store',
+        'Div': 'div',
+        'Carton Number': 'carton_number',
         'Whse Dept': 'whse_dept',
         'Area': 'area',
         'Slot': 'slot'
     }
+    
+    # Columns needed to build container_id
+    container_id_source_cols = ['Store', 'Div', 'Carton Number']
     
     # Read both Inhouse Data and Crossdock Data sheets
     dfs = []
@@ -42,10 +60,32 @@ def load_shipvoid_forecast(file_path: str) -> pd.DataFrame:
     
     for sheet_name, source_label in sheet_configs:
         try:
-            sheet_df = pd.read_excel(file_path, sheet_name=sheet_name)
+            # Read with string dtype for columns used to build container_id
+            dtype_spec = {'Store': str, 'Div': str, 'Carton Number': str}
+            sheet_df = pd.read_excel(file_path, sheet_name=sheet_name, dtype=dtype_spec)
+            
+            # Create container_id by concatenating Store + Div + Carton Number
+            missing_cols = [c for c in container_id_source_cols if c not in sheet_df.columns]
+            if missing_cols:
+                print(f"  Warning: Missing columns for container_id creation: {missing_cols}")
+                # If Container ID column exists as fallback, use it
+                if 'Container ID' in sheet_df.columns:
+                    sheet_df['container_id'] = sheet_df['Container ID'].astype(str).str.strip()
+                    print(f"  Using existing 'Container ID' column as fallback")
+                else:
+                    raise ValueError(f"Cannot create container_id - missing: {missing_cols}")
+            else:
+                # Create container_id from Store + Div + Carton Number
+                sheet_df['container_id'] = (
+                    sheet_df['Store'].astype(str).str.strip() + 
+                    sheet_df['Div'].astype(str).str.strip() + 
+                    sheet_df['Carton Number'].astype(str).str.strip()
+                )
+                print(f"  Created container_id from Store + Div + Carton Number")
+            
             # Only select columns that exist in this sheet
             available_cols = [c for c in columns_needed.keys() if c in sheet_df.columns]
-            sheet_df = sheet_df[available_cols].rename(columns=columns_needed)
+            sheet_df = sheet_df[available_cols + ['container_id']].rename(columns=columns_needed)
             sheet_df['source_type'] = source_label
             dfs.append(sheet_df)
             print(f"  Loaded {len(sheet_df):,} records from '{sheet_name}' sheet")
@@ -58,7 +98,7 @@ def load_shipvoid_forecast(file_path: str) -> pd.DataFrame:
     # Combine all sheets
     df = pd.concat(dfs, ignore_index=True)
     
-    # Clean container_id - ensure it's a string
+    # Clean container_id - ensure it's a string and strip whitespace
     df['container_id'] = df['container_id'].astype(str).str.strip()
     
     # Parse label_date - remove time component
@@ -81,10 +121,11 @@ def load_shipvoid_forecast(file_path: str) -> pd.DataFrame:
 def load_legacy_unbilled(file_path: str) -> pd.DataFrame:
     """Load and process the Legacy Unbilled Cartons CSV file."""
     print(f"Loading Legacy Unbilled Cartons from: {file_path}")
-    df = pd.read_csv(file_path, low_memory=False)
+    # Read CSV - ensure container_id is read as string to preserve leading zeros
+    df = pd.read_csv(file_path, low_memory=False, dtype={'container_id': str})
     
     # Clean container_id
-    df['container_id'] = df['container_id'].astype(str).str.strip()
+    df['container_id'] = df['container_id'].str.strip()
     
     # Find the latest event timestamp, corresponding status, event name, and location
     event_ts_cols = ['event_ts_1', 'event_ts_2', 'event_ts_3', 'event_ts_4', 'event_ts_5']
@@ -133,8 +174,18 @@ def load_legacy_unbilled(file_path: str) -> pd.DataFrame:
 
 
 def merge_data(shipvoid_df: pd.DataFrame, legacy_df: pd.DataFrame) -> pd.DataFrame:
-    """Merge the two datasets on container_id."""
+    """Merge the two datasets on container_id with timeline validation.
+    
+    Since container IDs can be re-used (wrapped), we validate that the
+    container_create_date from legacy data matches the label_date from
+    shipvoid forecast to ensure we're comparing the same containers.
+    """
     print("Merging datasets on container_id...")
+    
+    # Ensure container_create_date is parsed as datetime
+    legacy_df = legacy_df.copy()
+    legacy_df['container_create_date'] = pd.to_datetime(legacy_df['container_create_date'], errors='coerce')
+    legacy_df['container_create_date_only'] = legacy_df['container_create_date'].dt.date
     
     # Group legacy data by container_id, taking the latest event
     legacy_grouped = legacy_df.sort_values('latest_event_ts', ascending=False)
@@ -143,20 +194,52 @@ def merge_data(shipvoid_df: pd.DataFrame, legacy_df: pd.DataFrame) -> pd.DataFra
     # Merge on container_id
     merged = pd.merge(
         shipvoid_df,
-        legacy_grouped[['container_id', 'latest_event_ts', 'latest_event_status', 'latest_event_name', 'atlas_location']],
+        legacy_grouped[['container_id', 'container_create_date', 'container_create_date_only', 'latest_event_ts', 'latest_event_status', 'latest_event_name', 'atlas_location']],
         on='container_id',
         how='left'
     )
     
+    # Timeline validation: filter out records where container_create_date doesn't match label_date
+    # This prevents matching re-used/wrapped container IDs from different time periods
+    pre_filter_count = len(merged)
+    
+    # Only validate where both dates exist
+    has_both_dates = merged['label_date'].notna() & merged['container_create_date_only'].notna()
+    
+    # Check if dates match (allowing for same-day match)
+    dates_match = merged['label_date'] == merged['container_create_date_only']
+    
+    # Keep records where: no legacy match found OR dates match
+    no_legacy_match = merged['container_create_date_only'].isna()
+    valid_timeline = no_legacy_match | dates_match
+    
+    # For mismatched timelines, clear the legacy data (treat as no match)
+    timeline_mismatch = has_both_dates & ~dates_match
+    mismatch_count = timeline_mismatch.sum()
+    
+    if mismatch_count > 0:
+        print(f"  Timeline validation: {mismatch_count:,} records had mismatched container_create_date vs label_date")
+        print(f"  These container IDs are likely re-used/wrapped - clearing legacy match data")
+        # Clear legacy data for mismatched records instead of dropping them
+        merged.loc[timeline_mismatch, ['container_create_date', 'container_create_date_only', 'latest_event_ts', 'latest_event_status', 'latest_event_name', 'atlas_location']] = None
+    else:
+        print(f"  Timeline validation: All matched records have consistent dates")
+    
+    # Drop the helper column
+    merged = merged.drop(columns=['container_create_date_only', 'container_create_date'], errors='ignore')
+    
     # Group by container_id to consolidate multiple items per container
     # Keep first occurrence of each container (they should have same status)
-    merged_grouped = merged.groupby('container_id').agg({
+    # Build aggregation dict dynamically based on available columns
+    agg_cols = {
         'item': 'first',
         'item_description': 'first',
         'po': 'first',
         'shipvoid_status': 'first',
         'label_date': 'first',
         'store': 'first',
+        'div': 'first',
+        'carton_number': 'first',
         'whse_dept': 'first',
         'area': 'first',
         'slot': 'first',
@@ -165,7 +248,11 @@ def merge_data(shipvoid_df: pd.DataFrame, legacy_df: pd.DataFrame) -> pd.DataFra
         'latest_event_status': 'first',
         'latest_event_name': 'first',
         'atlas_location': 'first'
-    }).reset_index()
+    }
+    # Only include columns that exist in the merged dataframe
+    agg_cols = {k: v for k, v in agg_cols.items() if k in merged.columns}
+    
+    merged_grouped = merged.groupby('container_id').agg(agg_cols).reset_index()
     
     print(f"  Merged data contains {len(merged_grouped):,} unique containers")
     return merged_grouped
@@ -203,7 +290,7 @@ def generate_html_report(df: pd.DataFrame, pivot_data: dict, output_path: str):
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Shipvoid Forecast Cross-Reference Report</title>
+    <title>RDC 6006 Cullman, AL - Shipvoid Forecast vs Legacy Unbilled Cartons</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
         :root {{
@@ -513,6 +600,28 @@ def generate_html_report(df: pd.DataFrame, pivot_data: dict, output_path: str):
             cursor: not-allowed;
         }}
         
+        /* Toast notification styles */
+        .toast {{
+            position: fixed;
+            bottom: 30px;
+            right: 30px;
+            background: #28a745;
+            color: white;
+            padding: 15px 25px;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+            z-index: 9999;
+            opacity: 0;
+            transform: translateY(20px);
+            transition: all 0.3s ease;
+            font-weight: 500;
+        }}
+        
+        .toast.show {{
+            opacity: 1;
+            transform: translateY(0);
+        }}
+        
         @media (max-width: 768px) {{
             .header {{
                 padding: 15px 20px;
@@ -537,9 +646,12 @@ def generate_html_report(df: pd.DataFrame, pivot_data: dict, output_path: str):
         <div class="logo-container">
             <img src="team-logo.png" alt="Team Logo" class="team-logo">
         </div>
-        <h1>📦 Shipvoid Forecast Cross-Reference Report</h1>
+        <h1>📊 RDC 6006 Cullman, AL - Shipvoid Forecast vs Legacy Unbilled Cartons 📊</h1>
         <p>Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
     </div>
+    
+    <!-- Toast notification -->
+    <div id="toast" class="toast"></div>
     
     <div class="container">
         <div class="dashboard">
@@ -602,6 +714,7 @@ def generate_html_report(df: pd.DataFrame, pivot_data: dict, output_path: str):
                     </select>
                     <button class="btn secondary" onclick="resetFilters()">Reset</button>
                     <button class="btn" onclick="exportToCSV()">Export CSV</button>
+                    <button class="btn" onclick="copyContainerIds()">📋 Copy Container IDs</button>
                 </div>
             </div>
             <div class="table-wrapper">
@@ -616,7 +729,7 @@ def generate_html_report(df: pd.DataFrame, pivot_data: dict, output_path: str):
                             <th onclick="sortTable('whse_dept')">Whse Dept <span class="sort-icon">↕</span></th>
                             <th onclick="sortTable('area')">Area <span class="sort-icon">↕</span></th>
                             <th onclick="sortTable('slot')">Slot <span class="sort-icon">↕</span></th>
-                            <th onclick="sortTable('shipvoid_status')">Status <span class="sort-icon">↕</span></th>
+                            <th onclick="sortTable('shipvoid_status')">Legacy Cartons <span class="sort-icon">↕</span></th>
                             <th onclick="sortTable('latest_event_ts')">Latest Event Time <span class="sort-icon">↕</span></th>
                             <th onclick="sortTable('latest_event_name')">Latest Event Name <span class="sort-icon">↕</span></th>
                             <th onclick="sortTable('latest_event_status')">Atlas Status <span class="sort-icon">↕</span></th>
@@ -950,7 +1063,7 @@ def generate_html_report(df: pd.DataFrame, pivot_data: dict, output_path: str):
         }}
         
         function exportToCSV() {{
-            const headers = ['Container ID', 'Source', 'Item', 'Item Description', 'PO', 'Whse Dept', 'Area', 'Slot', 'Status', 'Latest Event Time', 'Latest Event Name', 'Atlas Status', 'Atlas Location', 'Label Date'];
+            const headers = ['Container ID', 'Source', 'Item', 'Item Description', 'PO', 'Whse Dept', 'Area', 'Slot', 'Legacy Cartons', 'Latest Event Time', 'Latest Event Name', 'Atlas Status', 'Atlas Location', 'Label Date'];
             const rows = filteredData.map(row => [
                 row.container_id,
                 row.source_type,
@@ -979,6 +1092,45 @@ def generate_html_report(df: pd.DataFrame, pivot_data: dict, output_path: str):
             link.download = 'shipvoid_report_' + new Date().toISOString().slice(0,10) + '.csv';
             link.click();
         }}
+        
+        function copyContainerIds() {{
+            // Get all unique container IDs from filtered data
+            const containerIds = [...new Set(filteredData.map(row => row.container_id))].filter(id => id && id !== '');
+            
+            if (containerIds.length === 0) {{
+                showToast('No container IDs to copy!', 'warning');
+                return;
+            }}
+            
+            // Join with newlines for easy pasting
+            const text = containerIds.join('\\n');
+            
+            // Copy to clipboard
+            navigator.clipboard.writeText(text).then(() => {{
+                showToast(`\u2705 Copied ${{containerIds.length.toLocaleString()}} container IDs to clipboard!`);
+            }}).catch(err => {{
+                // Fallback for older browsers
+                const textarea = document.createElement('textarea');
+                textarea.value = text;
+                document.body.appendChild(textarea);
+                textarea.select();
+                document.execCommand('copy');
+                document.body.removeChild(textarea);
+                showToast(`\u2705 Copied ${{containerIds.length.toLocaleString()}} container IDs to clipboard!`);
+            }});
+        }}
+        
+        function showToast(message, type = 'success') {{
+            const toast = document.getElementById('toast');
+            toast.textContent = message;
+            toast.style.background = type === 'warning' ? '#ffc107' : '#28a745';
+            toast.style.color = type === 'warning' ? '#333' : 'white';
+            toast.classList.add('show');
+            
+            setTimeout(() => {{
+                toast.classList.remove('show');
+            }}, 3000);
+        }}
     </script>
 </body>
 </html>'''
@@ -1003,35 +1155,63 @@ def find_newest_file(pattern: str, directory: str = ".") -> str | None:
     return files[0]
 
 
-def main():
+def main(skip_download: bool = False):
+    """
+    Main entry point for the report generator.
+    
+    Args:
+        skip_download: If True, skip downloading from SharePoint and use local files only.
+    """
     print("="*60)
     print("Shipvoid Forecast Cross-Reference Report Generator")
     print("="*60)
     print()
     
-    # Auto-detect newest files
-    print("Searching for newest data files...")
+    shipvoid_file = None
+    legacy_file = None
     
-    # Find newest Shipvoid Forecast file (Excel files starting with "Shipvoid")
-    shipvoid_file = find_newest_file("Shipvoid*.xls*")
+    # Try to download from SharePoint first (unless skipped)
+    if not skip_download and SHAREPOINT_AVAILABLE:
+        print("Attempting to download latest files from SharePoint...")
+        print()
+        try:
+            downloaded_shipvoid, downloaded_legacy = download_shipvoid_files(Path("."))
+            if downloaded_shipvoid:
+                shipvoid_file = str(downloaded_shipvoid)
+            if downloaded_legacy:
+                legacy_file = str(downloaded_legacy)
+            print()
+        except Exception as e:
+            print(f"\nWarning: Could not download from SharePoint: {e}")
+            print("Falling back to local files...")
+            print()
+    
+    # Fall back to local files if download failed or was skipped
     if not shipvoid_file:
-        shipvoid_file = find_newest_file("Shipvoid*.xlsx")
-    if not shipvoid_file:
+        print("Searching for local Shipvoid Forecast files...")
+        # Look for Excel files (xlsm/xlsx) - need both Inhouse and Crossdock sheets
         shipvoid_file = find_newest_file("Shipvoid*.xlsm")
+        if not shipvoid_file:
+            shipvoid_file = find_newest_file("Shipvoid*.xlsx")
+        if not shipvoid_file:
+            shipvoid_file = find_newest_file("Shipvoid*.xls*")
     
-    # Find newest Legacy Unbilled Carton Report (CSV files starting with "Legacy")
-    legacy_file = find_newest_file("Legacy*.csv")
+    if not legacy_file:
+        print("Searching for local Legacy Unbilled files...")
+        legacy_file = find_newest_file("Legacy*.csv")
     
     output_file = "shipvoid_crossref_report.html"
     
     # Check files exist
     if not shipvoid_file:
-        print("ERROR: No Shipvoid Forecast file found (looking for Shipvoid*.xls*)")
+        print("ERROR: No Shipvoid Forecast file found (looking for Shipvoid*.xlsm)")
         print("  Please ensure a file like 'Shipvoid Forecast YYYY-MM-DD.xlsm' exists in this directory.")
+        print("  Or enable SharePoint download to fetch the latest files automatically.")
         return
     if not legacy_file:
         print("ERROR: No Legacy Unbilled Carton Report found (looking for Legacy*.csv)")
         print("  Please ensure a file like 'Legacy_Unbilled_Carton_Report-*.csv' exists in this directory.")
+        print("  Or enable SharePoint download to fetch the latest files automatically.")
         return
     
     print(f"  Found Shipvoid file: {shipvoid_file}")
@@ -1058,4 +1238,23 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+    
+    # Check for --skip-download flag
+    skip_download = "--skip-download" in sys.argv or "--local" in sys.argv
+    
+    if "--help" in sys.argv or "-h" in sys.argv:
+        print("Shipvoid Forecast Cross-Reference Report Generator")
+        print()
+        print("Usage: python generate_report.py [OPTIONS]")
+        print()
+        print("Options:")
+        print("  --skip-download, --local  Skip downloading from SharePoint, use local files only")
+        print("  --help, -h                Show this help message")
+        print()
+        print("Data Source:")
+        print("  Files are downloaded from the SharePoint folder:")
+        print("  https://teams.wal-mart.com/.../AtlasAmbientRDCPlaybookPlanning/.../Shipvoid Forecast/6031")
+        sys.exit(0)
+    
+    main(skip_download=skip_download)

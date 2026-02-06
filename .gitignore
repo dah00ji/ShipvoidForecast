@@ -1,6 +1,34 @@
-*.csv
-*.xlsm
-*.xlsx
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+env/
+.env/
+
+# Data files (may contain PII)
+*.csv
+*.xlsx
+*.xlsm
+*.xls
+
+# SQLite databases
+*.db
+*.sqlite
+*.sqlite3
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
 .DS_Store
+Thumbs.db
+
+# Generated reports (these can be re-generated)
+shipvoid_crossref_report.html
